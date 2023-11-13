@@ -1,0 +1,397 @@
+if (!require("httr")) {
+  install.packages("httr")
+  library(httr)
+}
+
+if (!require("jsonlite")) {
+  install.packages("jsonlite")
+  library(jsonlite)
+}
+
+if (!require("purrr")) {
+  install.packages("purrr")
+  library(purrr)
+}
+
+if (!require("rugarch")) {
+  install.packages("rugarch")
+  library(rugarch)
+}
+
+if (!require("dplyr")) {
+  install.packages("dplyr")
+  library(dplyr)
+}
+
+if (!require("tidyr")) {
+  install.packages("tidyr")
+  library(tidyr)
+}
+
+if (!require("openxlsx")) {
+  install.packages("openxlsx")
+  library(openxlsx)
+}
+
+if (!require("ggplot2")) {
+  install.packages("ggplot2")
+  library(ggplot2)
+}
+
+
+get_options_data <- function(apikey, symbol) {
+  url <- paste0("https://api.tdameritrade.com/v1/marketdata/chains?",
+                "apikey=", apikey,
+                "&symbol=", symbol,
+                "&contractType=ALL&strategy=ANALYTICAL&optionType=S")
+  
+  response <- GET(url)
+  
+  print(split_index)
+  print(nrow(test_data))
+  
+  
+  if (http_status(response)$category != "Success") {
+    print("Response Content:")
+    print(content(response, "text", encoding = "UTF-8"))
+    warning("Failed to fetch data")
+    return(NULL)
+  }
+  
+  data <- content(response, "text", encoding = "UTF-8")
+  json_data <- fromJSON(data, flatten = TRUE)
+  
+  return(json_data)
+}
+
+consumer_key <- "GV3QJACWYLRD7HLBCYIQMW1ENFRUMY2K"
+symbol <- "MSTR"
+options_data <- get_options_data(consumer_key, symbol)
+
+
+# Assume call_exp_data is the nested data structure you have
+call_exp_data <- options_data$callExpDateMap
+
+# Create an empty data frame to hold the results
+call_exp_df <- data.frame()
+
+# Iterate through the dates
+for (date in names(call_exp_data)) {
+  date_data <- call_exp_data[[date]]
+  
+  # Iterate through the strikes for the current date
+  for (strike in names(date_data)) {
+    strike_data <- date_data[[strike]]
+    
+    # Convert the strike data into a data frame
+    strike_df <- as.data.frame(strike_data)
+    
+    # Add date and strike columns
+    strike_df$date <- date
+    strike_df$strike <- strike
+    
+    # Bind the current strike data to the result
+    call_exp_df <- bind_rows(call_exp_df, strike_df)
+  }
+}
+
+# Now, call_exp_df should be a flat data frame with the desired information
+print(call_exp_df)
+
+write.xlsx(call_exp_df, "options_data.xlsx")
+getwd()
+
+
+symbol <- "MSTR"
+apikey <- "GV3QJACWYLRD7HLBCYIQMW1ENFRUMY2K"
+url <- paste0("https://api.tdameritrade.com/v1/marketdata/", symbol, "/pricehistory")
+
+query_params <- list(
+  apikey = apikey,
+  periodType = "year",
+  period = 3,
+  frequencyType = "daily",
+  frequency = 1,
+  needExtendedHoursData = "false"
+)
+
+print(paste0("Sending request to: ", url))
+print("With query parameters:")
+print(query_params)
+
+response <- GET(url, query = query_params)
+
+print("Received response:")
+content_text <- content(response, "text") # Add this line
+
+# Parse the JSON content
+data_list <- fromJSON(content_text)
+
+# Create a data frame
+df <- as.data.frame(data_list$candles)
+
+# Convert the datetime to a Date object
+df$datetime <- as.Date(as.POSIXct(df$datetime/1000, origin="1970-01-01"))
+
+# Plotting
+ggplot(df, aes(x=datetime, y=close)) +
+  geom_line() +
+  ggtitle("Price History for MSTR") +
+  xlab("Date") +
+  ylab("Close Price")
+
+# Split the data into a 2-year training set and 1-year test set
+split_index <- nrow(df) - 252 # Assuming 252 trading days in a year
+train_data <- df[1:split_index, ]
+test_data <- df[(split_index + 1):nrow(df), ]
+
+# Calculate daily returns
+train_returns <- diff(log(train_data$close))
+test_returns <- diff(log(test_data$close))
+
+# Fit the EGARCH model to the training returns
+spec <- ugarchspec(variance.model = list(garchOrder = c(1, 1), model = "eGARCH"), mean.model = list(armaOrder = c(1, 1), include.mean = TRUE), distribution.model = "std")
+fit_egarch <- ugarchfit(spec, data = train_returns)
+print(summary(fit_egarch))
+show(fit_egarch)
+
+# Initialize a vector to hold the forecasted volatilities
+forecasted_volatility <- vector("numeric", length(test_returns))
+
+
+# Loop through the test set and forecast the volatility for each day
+for(i in 1:length(test_returns)) {
+  # Fit the EGARCH model to the data up to the current point
+  fit_egarch <- ugarchfit(spec, data = c(train_returns, test_returns[1:i]))
+  # Forecast the volatility for the next time step
+  forecast_egarch <- ugarchforecast(fit_egarch, n.ahead = 1)
+  # Print the forecast object to see what it looks like
+  print(forecast_egarch)
+  # Extract the forecasted volatility for the next time step
+  forecasted_volatility[i] <- forecast_egarch@forecast$sigmaFor[1]
+}
+
+
+# Calculate realized daily volatility (e.g., squared daily returns)
+realized_volatility <- test_returns^2
+
+# Compare the forecasted and realized volatilities (e.g., using Mean Squared Error)
+mse <- mean((forecasted_volatility - realized_volatility)^2)
+print(paste("Mean Squared Error:", mse))
+
+comparison_data <- data.frame(
+  Date = test_data$datetime[-1], # Excluding the first date
+  Forecasted = forecasted_volatility,
+  Realized = realized_volatility
+)
+
+print(head(comparison_data)) # Check the result
+
+# Plot the forecasted vs. realized volatilities
+library(ggplot2)
+ggplot(comparison_data, aes(x = Date)) +
+  geom_line(aes(y = Forecasted, color = "Forecasted")) +
+  geom_line(aes(y = Realized, color = "Realized")) +
+  labs(
+    title = "Forecasted vs. Realized Volatility",
+    y = "Volatility",
+    x = "Date",
+    color = "Legend"
+  ) +
+  scale_color_manual(values = c("Forecasted" = "red", "Realized" = "blue")) +
+  theme_minimal()
+
+# Calculate daily returns for the training data
+train_returns <- diff(log(train_data$close))
+
+# Check if the lmtest package is installed
+if (!requireNamespace("lmtest", quietly = TRUE)) {
+  install.packages("lmtest")
+}
+
+# Load the lmtest package
+library(lmtest)
+
+# If you don't have the zoo package, install it
+if (!requireNamespace("zoo", quietly = TRUE)) {
+  install.packages("zoo")
+}
+
+library(zoo)
+
+# Calculate daily returns
+train_returns <- diff(log(train_data$close))
+
+# Calculate volatility (squared returns)
+volatility <- train_returns^2
+
+# Calculate 10-day rolling average of volatility
+lagged_volatility <- rollmean(volatility, 10, align = "right")
+
+# Check for NA values in current_volatility
+na_current_volatility <- any(is.na(current_volatility))
+print(paste("NA values in current_volatility:", na_current_volatility))
+
+# Check for NA values in lagged_volatility
+na_lagged_volatility <- any(is.na(lagged_volatility))
+print(paste("NA values in lagged_volatility:", na_lagged_volatility))
+
+
+# Remove the first 9 observations from current_volatility to match lengths
+current_volatility <- volatility[10:length(volatility)]
+
+# Check lengths to ensure they match
+length(current_volatility)
+length(lagged_volatility)
+
+# Fit a linear model using the 10-day average volatility
+model <- lm(current_volatility ~ lagged_volatility)
+
+# Perform the Breusch-Pagan test
+bp_test <- bptest(model)
+
+# Print the result
+print(bp_test)
+
+plot(fitted(model), residuals(model), 
+     xlab = "Fitted Values", 
+     ylab = "Residuals", 
+     main = "Residuals vs. Fitted Values")
+abline(h = 0, lty = 2) # adds a dashed horizontal line at 0
+
+plot_data <- data.frame(
+  Fitted_Values = fitted(model),
+  Residuals = residuals(model)
+)
+
+# Print the first few rows of the data
+print(plot_data)
+
+# Save to a CSV file 
+write.csv(plot_data, "residuals_plot_data.csv")
+
+
+# Calculate volatility (squared returns)
+volatility <- train_returns^2
+
+# Create a data frame with the current volatility
+volatility_table <- data.frame(current_volatility = volatility)
+
+# Add columns for the lagged volatilities for different lags
+for (lag_length in 1:4) {
+  volatility_table[paste("lagged_volatility_", lag_length, "day", sep = "")] <- dplyr::lag(volatility, lag_length)
+}
+
+# Remove rows with NA (where lagged values are not available)
+volatility_table <- na.omit(volatility_table)
+
+# Print the table
+print(volatility_table)
+
+# Initialize an empty vector to store R-squared values
+r_squared_values <- numeric(0)
+
+# Define the range for the window lengths
+window_lengths <- 2:60
+
+# Loop through different window lengths from 2 to 60
+for (window_length in window_lengths) {
+  # Calculate volatility (squared returns)
+  volatility <- train_returns^2
+  
+  # Calculate rolling average of volatility with the current window length
+  lagged_volatility <- rollmean(volatility, window_length, align = "right", na.pad = TRUE)
+  
+  # Create a lag of the rolling average with a lag of 1 day
+  lagged_volatility <- dplyr::lag(lagged_volatility, 1)
+  
+  # Remove the first 'window_length' observations to match lengths
+  current_volatility <- volatility[window_length:length(volatility)]
+  lagged_volatility <- lagged_volatility[window_length:length(lagged_volatility)]
+  
+  # Check lengths to ensure they match
+  stopifnot(length(current_volatility) == length(lagged_volatility))
+  
+  # Fit a linear model using the rolling average volatility
+  model <- lm(current_volatility ~ lagged_volatility)
+  
+  # Retrieve the R-squared value
+  r_squared <- summary(model)$r.squared
+  
+  # Store the R-squared value
+  r_squared_values <- c(r_squared_values, r_squared)
+}
+
+# Find the index of the window length that gives the highest R-squared value
+best_window_index <- which.max(r_squared_values)
+
+# Retrieve the corresponding window length
+best_window_length <- window_lengths[best_window_index]
+
+# Print the best window length
+print(paste("The best window length for the moving average is", best_window_length))
+
+# Define the window length
+window_length <- 2
+
+# Calculate volatility (squared returns)
+volatility <- train_returns^2
+
+# Calculate 2-day rolling average of volatility
+lagged_volatility <- rollmean(volatility, window_length, align = "right", na.pad = TRUE)
+
+# Create a lag of the rolling average with a lag of 1 day
+lagged_volatility <- dplyr::lag(lagged_volatility, 1)
+
+# Remove the first 'window_length' observations to match lengths
+current_volatility <- volatility[window_length:length(volatility)]
+lagged_volatility <- lagged_volatility[window_length:length(lagged_volatility)]
+
+# Fit a linear model using the 2-day rolling average volatility
+model <- lm(current_volatility ~ lagged_volatility)
+
+# Predict the volatility using the model
+predicted_volatility <- predict(model)
+
+# Create a plot
+plot(current_volatility, type = "l", col = "red", lwd = 2, main = "Actual vs Predicted Volatility (2-day moving average)", ylab = "Volatility", xlab = "Time")
+lines(predicted_volatility, col = "blue", lwd = 2)
+
+# Add a legend
+legend("topright", legend = c("Actual", "Predicted"), col = c("red", "blue"), lwd = 2)
+
+# Define the window length
+window_length <- 2
+
+# Calculate volatility (squared returns)
+volatility <- train_returns^2
+
+# Calculate 2-day rolling average of volatility
+lagged_volatility <- rollmean(volatility, window_length, align = "right", na.pad = TRUE)
+
+# Create a lag of the rolling average with a lag of 1 day
+lagged_volatility <- dplyr::lag(lagged_volatility, 1)
+
+# Remove the first 'window_length' observations to match lengths
+current_volatility <- volatility[window_length:length(volatility)]
+lagged_volatility <- lagged_volatility[window_length:length(lagged_volatility)]
+
+# Fit a linear model using the 2-day rolling average volatility
+model <- lm(current_volatility ~ lagged_volatility)
+
+# Predict the volatility using the model
+predicted_volatility <- predict(model)
+
+# Calculate the residuals
+residuals <- current_volatility - predicted_volatility
+
+# Create a plot for actual vs predicted
+par(mfrow = c(2, 1)) # Set up a 2-row plot layout
+plot(current_volatility, type = "l", col = "red", lwd = 2, main = "Actual vs Predicted Volatility (2-day moving average)", ylab = "Volatility", xlab = "Time")
+lines(predicted_volatility, col = "blue", lwd = 2)
+
+# Add a legend
+legend("topright", legend = c("Actual", "Predicted"), col = c("red", "blue"), lwd = 2)
+
+# Plot the residuals
+plot(residuals, type = "l", col = "green", lwd = 2, main = "Residuals", ylab = "Residual", xlab = "Time")
